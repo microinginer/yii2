@@ -2,8 +2,10 @@
 namespace yiiunit\framework\db;
 
 use yiiunit\data\ar\ActiveRecord;
+use yiiunit\data\ar\BitValues;
 use yiiunit\data\ar\Category;
 use yiiunit\data\ar\Customer;
+use yiiunit\data\ar\Document;
 use yiiunit\data\ar\NullValues;
 use yiiunit\data\ar\OrderItem;
 use yiiunit\data\ar\Order;
@@ -116,6 +118,19 @@ class ActiveRecordTest extends DatabaseTestCase
         $customer = Customer::findBySql('SELECT * FROM {{customer}} WHERE [[id]]=:id', [':id' => 2])->one();
         $this->assertTrue($customer instanceof Customer);
         $this->assertEquals('user2', $customer->name);
+    }
+
+    /**
+     * @depends testFindBySql
+     *
+     * @see https://github.com/yiisoft/yii2/issues/8593
+     */
+    public function testCountWithFindBySql()
+    {
+        $query = Customer::findBySql('SELECT * FROM {{customer}}');
+        $this->assertEquals(3, $query->count());
+        $query = Customer::findBySql('SELECT * FROM {{customer}} WHERE  [[id]]=:id', [':id' => 2]);
+        $this->assertEquals(1, $query->count());
     }
 
     public function testFindLazyViaTable()
@@ -678,8 +693,16 @@ class ActiveRecordTest extends DatabaseTestCase
         $this->assertEquals(2, count($orders[0]->orderItems));
         $this->assertEquals(3, count($orders[1]->orderItems));
         $this->assertEquals(1, count($orders[2]->orderItems));
+
+        // https://github.com/yiisoft/yii2/issues/8149
+        $model = new Customer();
+        $model->name = 'test';
+        $model->email = 'test';
+        $model->save(false);
+        $model->updateCounters(['status' => 1]);
+        $this->assertEquals(1, $model->status);
     }
-    
+
     public function testPopulateRecordCallWhenQueryingOnParentClass() 
     {
         (new Cat())->save(false);
@@ -690,5 +713,124 @@ class ActiveRecordTest extends DatabaseTestCase
 
         $animal = Animal::find()->where(['type' => Cat::className()])->one();
         $this->assertEquals('meow', $animal->getDoes());
+    }
+
+    public function testSaveEmpty()
+    {
+        $record = new NullValues;
+        $this->assertTrue($record->save(false));
+        $this->assertEquals(1, $record->id);
+    }
+
+    public function testOptimisticLock()
+    {
+        /* @var $record Document */
+
+        $record = Document::findOne(1);
+        $record->content = 'New Content';
+        $record->save(false);
+        $this->assertEquals(1, $record->version);
+
+        $record = Document::findOne(1);
+        $record->content = 'Rewrite attempt content';
+        $record->version = 0;
+        $this->setExpectedException('yii\db\StaleObjectException');
+        $record->save(false);
+    }
+
+    public function testPopulateWithoutPk()
+    {
+        // tests with single pk asArray
+        $aggregation = Customer::find()
+            ->select(['{{customer}}.[[status]]', 'SUM({{order}}.[[total]]) AS [[sumtotal]]'])
+            ->joinWith('ordersPlain', false)
+            ->groupBy('{{customer}}.[[status]]')
+            ->orderBy('status')
+            ->asArray()
+            ->all();
+
+        $expected = [
+            [
+                'status' => 1,
+                'sumtotal' => 183,
+            ],
+            [
+                'status' => 2,
+                'sumtotal' => 0,
+            ],
+        ];
+        $this->assertEquals($expected, $aggregation);
+
+        // tests with single pk with Models
+        $aggregation = Customer::find()
+            ->select(['{{customer}}.[[status]]', 'SUM({{order}}.[[total]]) AS [[sumTotal]]'])
+            ->joinWith('ordersPlain', false)
+            ->groupBy('{{customer}}.[[status]]')
+            ->orderBy('status')
+            ->all();
+        $this->assertCount(2, $aggregation);
+        $this->assertContainsOnlyInstancesOf(Customer::className(), $aggregation);
+        foreach($aggregation as $item) {
+            if ($item->status == 1) {
+                $this->assertEquals(183, $item->sumTotal);
+            } elseif ($item->status == 2) {
+                $this->assertEquals(0, $item->sumTotal);
+            }
+        }
+
+        // tests with composite pk asArray
+        $aggregation = OrderItem::find()
+            ->select(['[[order_id]]', 'SUM([[subtotal]]) AS [[subtotal]]'])
+            ->joinWith('order', false)
+            ->groupBy('[[order_id]]')
+            ->orderBy('[[order_id]]')
+            ->asArray()
+            ->all();
+        $expected = [
+            [
+                'order_id' => 1,
+                'subtotal' => 70,
+            ],
+            [
+                'order_id' => 2,
+                'subtotal' => 33,
+            ],
+            [
+                'order_id' => 3,
+                'subtotal' => 40,
+            ],
+        ];
+        $this->assertEquals($expected, $aggregation);
+
+        // tests with composite pk with Models
+        $aggregation = OrderItem::find()
+            ->select(['[[order_id]]', 'SUM([[subtotal]]) AS [[subtotal]]'])
+            ->joinWith('order', false)
+            ->groupBy('[[order_id]]')
+            ->orderBy('[[order_id]]')
+            ->all();
+        $this->assertCount(3, $aggregation);
+        $this->assertContainsOnlyInstancesOf(OrderItem::className(), $aggregation);
+        foreach($aggregation as $item) {
+            if ($item->order_id == 1) {
+                $this->assertEquals(70, $item->subtotal);
+            } elseif ($item->order_id == 2) {
+                $this->assertEquals(33, $item->subtotal);
+            } elseif ($item->order_id == 3) {
+                $this->assertEquals(40, $item->subtotal);
+            }
+        }
+    }
+
+    /**
+     * https://github.com/yiisoft/yii2/issues/9006
+     */
+    public function testBit()
+    {
+        $falseBit = BitValues::findOne(1);
+        $this->assertEquals(false, $falseBit->val);
+
+        $trueBit = BitValues::findOne(2);
+        $this->assertEquals(true, $trueBit->val);
     }
 }
